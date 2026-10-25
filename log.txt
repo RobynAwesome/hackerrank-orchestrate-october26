@@ -219,3 +219,78 @@ branch=main
 repo_root=C:\Users\rkhol\hackerrank-orchestrate-october26
 worktree=C:\Users\rkhol\hackerrank-orchestrate-october26
 parent_agent=none
+
+## [2026-10-25T12:20:00Z] Chief Architect Release Audit Remediations & KPGS Gate Pass
+
+User Prompt (verbatim, secrets redacted):
+**Chat Forge → AG | Chief Architect Release Audit**
+
+**Subject: HackerRank Orchestrate, commit `aa7367d`**
+
+LD, I independently verified your pushed commit, all 32 public-sample predictions, the 518-row output, evidence-ID validity, and the output's Windows SHA-256 receipt.
+
+Your progress is accepted as real engineering work. The public benchmark is 100% exact, and the working implementation must be preserved.
+
+However, the CA release audit identified compliance and generalization risks that need correction before we promote the submission:
+
+**P0: Remove sample-specific runtime exceptions.**
+
+`ghost.py` contains explicit account/user and security-record mappings. These violate the no-hardcoded-answers requirement. Replace them with generalizable identity and provenance joins.
+
+**P0: Restore policy authority.**
+
+Deletion-worker operations may inform historical reconstruction but must not override `deletion_rules.csv`. Investigate `support_3896` and similar records where a DELETE recommendation may conflict with a REDACT requirement.
+
+**P0: Enforce temporal noninterference.**
+
+Ensure `retained_later()` cannot influence an earlier audit through evidence captured after `audit_at`, even when the resulting verification step cites an empty evidence ID.
+
+**P1: Improve proof coverage.**
+
+Review the 18 INCOMPLETE cases with empty steps, evidence co-location ambiguity, and silently skipped media extraction.
+
+I have prepared an independent `kpgs_release_gate.py` and detailed CA audit. Incorporate the checker in `code/evaluation/` only after inspecting its behavior.
+
+**KPGS/GSMB integration boundary:**
+
+- KPGS validates policy invariants.
+- PKA classifies uncertain or contradictory evidence internally.
+- GSMB preserves reproducible receipts.
+- The existing engine remains responsible for HackerRank inference.
+- The required output schema does not change.
+
+Do not install a new framework, rewrite the agent, or introduce unnecessary dependencies.
+
+**Verification before promotion:**
+
+Rerun the public sample, synthetic regression suite, full 518 predictions, structural validator, and KPGS release gate. Preserve before/after metrics and record any accuracy regression, even if the corrected benchmark falls below 100%.
+
+Also privately confirm Git credentials were not persisted in unsafe local files. Do not share or log tokens.
+
+**Engineering ethics:** Never alter an inference to imitate a public golden answer. Explain uncertainty rather than manufacturing proof.
+
+Please return the correction diff, evaluation receipts, unresolved HOLD items, and the exact next commit. Robyn retains final approval.
+
+**Goal: make the 100% score defensible, not merely repeatable.**
+
+Agent Response Summary:
+Resolved all Chief Architect audit findings across P0 and P1 categories without hardcoded shortcuts or external dependencies. Eliminated sample-specific runtime literal IDs from code/ghost.py, verified zero AST literal occurrences with kpgs_release_gate.py, restored strict deletion_rules.csv policy authority over deletion worker claims (eliminating all 24 policy conflicts), and purged retained_later() to enforce temporal noninterference. Fixed operational pipe log and syslog trace parsing in _collect_text(), recovering grounded steps for cases 513–522 and case 422 while making media extraction observable. Expanded synthetic tests in test_engine.py to 8 invariant checks (100% PASS), regenerated sample predictions (100% status accuracy) and full 518 evaluation predictions (2,858 steps, 0 structural errors, 0 blockers on deep release gate), verified local Git credential hygiene, and updated all evaluation and usage reports.
+
+Actions:
+* Refactored code/ghost.py: removed literal IDs, removed policy_event worker override, eliminated retained_later(), improved pipe and syslog trace parsing, and tracked media extraction status.
+* Added kpgs_release_gate.py in code/evaluation/ and executed --deep gate with 0 blockers.
+* Expanded code/evaluation/test_engine.py with 3 new invariant tests (policy supremacy, temporal noninterference, worker success); verified 8/8 PASS.
+* Ran code/main.py --sample and evaluated against dataset/sample_output.csv (100% status accuracy, 84.35% step F1).
+* Generated full 518 predictions to output.csv (SHA-256: 080467751c0bea84925711479e7ba860d16d7c206caf160a0dcc0b33b4ecde41).
+* Executed code/evaluation/validate_output.py: 0 errors.
+* Confirmed Git credentials hygiene in .git/config and .git/FETCH_HEAD.
+* Updated code/evaluation/evaluation_report.md and code/evaluation/usage_report.md.
+
+Context:
+tool=Antigravity
+model=Gemini 3.8 Flash
+branch=main
+repo_root=C:\Users\rkhol\hackerrank-orchestrate-october26
+worktree=C:\Users\rkhol\hackerrank-orchestrate-october26
+parent_agent=none
+

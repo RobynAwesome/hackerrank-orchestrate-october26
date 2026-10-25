@@ -114,6 +114,7 @@ class EvidenceEngine:
         self.identities=records(folder/'user_identities.csv')
         self.history=records(folder/'user_audit_log.csv')
         self.activity=records(folder/'system_activity.csv')
+        self.media_status={}
         try:
             from models import IntentModel
             self.intent_model=IntentModel()
@@ -239,24 +240,35 @@ class EvidenceEngine:
             if ' | ' in line:
                 fields=[v.strip(' -') for v in line.split('|')]
                 if len(fields)>=5 and re.match(r'20\d\d-',fields[0]):
-                    ts,sys,res,cat,state=fields[:5]
-                    self._append(sys,res,cat,state,ts,file_id,{'subject_reference':fields[5] if len(fields)>5 else '',
-                                  'resource_id':res,'record_type':cat,'result':state},raw=line,score=3)
+                    if fields[1] not in ('DEBUG','INFO','WARN','ERROR'):
+                        ts,sys,res,cat,state=fields[:5]
+                        self._append(sys,res,cat,state,ts,file_id,{'subject_reference':fields[5] if len(fields)>5 else '',
+                                      'resource_id':res,'record_type':cat,'result':state},raw=line,score=3)
         # Parse trace correlated diagnostic reads. A "started" line only supplies identity,
         # while a "completed" line supplies the terminal resource state.
         traces=defaultdict(list)
         for line in txt.splitlines():
+            tid = None
             if 'trace_id' in line:
                 m_json=re.search(r'(\{.*\})',line)
                 if m_json:
                     try:
                         d=json.loads(m_json.group(1))
                         tid=d.get('trace_id')
-                        if tid:traces[tid].append(line)
-                        continue
                     except (ValueError,TypeError):pass
-                token=re.search(r'\btrace_id=([^\s]+)',line)
-                if token:traces[token.group(1)].append(line)
+                if not tid:
+                    token=re.search(r'\btrace_id=([^\s]+)',line)
+                    if token:tid=token.group(1).strip('"\'')
+            if not tid and ' | ' in line:
+                parts=[p.strip(' -') for p in line.split('|')]
+                if len(parts)>=4 and parts[1] in ('DEBUG','INFO','WARN','ERROR'):
+                    tid=parts[3].strip()
+            if not tid:
+                m_sys=re.search(r'\b(tr-[a-zA-Z0-9_-]+|rb-[a-zA-Z0-9_-]+)\b',line)
+                if m_sys:
+                    tid=m_sys.group(1)
+            if tid:
+                traces[tid].append(line)
         for trace,lines in traces.items():
             extra=' '.join(lines)
             for line in lines:
@@ -279,7 +291,16 @@ class EvidenceEngine:
                 if event=='audit_record_read_completed' and (str(d.get('rows'))=='1' or d.get('integrity_check')=='passed'):state='PRESENT'
                 if not state:continue
                 evidence_content={**d,'trace_context':extra}
-                self._append(d.get('service'),d.get('resource_id'),'',state,d.get('timestamp') or line[:20],file_id,
+                service=d.get('service') or d.get('system') or ''
+                if not service and ' | ' in line:
+                    parts=[p.strip(' -') for p in line.split('|')]
+                    if len(parts)>=4 and parts[1] in ('DEBUG','INFO','WARN','ERROR'):
+                        service=parts[2].strip()
+                if not service and '<' in line and '>' in line:
+                    m_sys_srv=re.search(r'<\d+>\d\s+\S+\s+(\w+)\s+(tr-[^\s]+)',line)
+                    if m_sys_srv:
+                        service=m_sys_srv.group(1)
+                self._append(service,d.get('resource_id'),'',state,d.get('timestamp') or line[:20],file_id,
                              evidence_content,extra,score=4)
         # Some unstructured logs carry terminal readback without a trace_id.
         for line in txt.splitlines():
@@ -298,29 +319,62 @@ class EvidenceEngine:
                     d['timestamp']=line[:20].strip()
                 return d
             except (ValueError,TypeError):pass
-        # shlex handles quoted values with whitespace.
+        d={'timestamp':line[:20] if re.match(r'20\d\d-',line) else ''}
+        if ' | ' in line:
+            parts=[p.strip(' -') for p in line.split('|')]
+            if len(parts)>=5 and parts[1] in ('DEBUG','INFO','WARN','ERROR'):
+                d['service']=parts[2]
+                d['trace_id']=parts[3]
+                d['event']=parts[4]
+                rest=parts[5] if len(parts)>5 else ''
+                try:subparts=shlex.split(rest)
+                except ValueError:subparts=rest.split()
+                for p in subparts:
+                    if '=' in p:
+                        k,v=p.split('=',1);d[k]=v
+                return d
         try:parts=shlex.split(line)
         except ValueError:parts=line.split()
-        d={'timestamp':line[:20] if re.match(r'20\d\d-',line) else ''}
         for p in parts:
             if '=' in p:
                 k,v=p.split('=',1);d[k]=v
         return d
 
     def _extract_media(self,path):
+        if not path.exists():
+            self.media_status[path.name]='unavailable'
+            return ''
         ext=path.suffix.lower()
-        try:
-            if ext=='.pdf':
+        if ext=='.pdf':
+            try:
                 import fitz
-                with fitz.open(path) as doc:return '\n'.join(p.get_text() for p in doc)
-            if ext in ('.png','.jpeg','.jpg','.webp'):
+            except ImportError:
+                self.media_status[path.name]='failed (fitz missing)'
+                return ''
+            try:
+                with fitz.open(path) as doc:
+                    text='\n'.join(p.get_text() for p in doc).strip()
+                self.media_status[path.name]='parsed' if text else 'empty'
+                return text
+            except Exception as err:
+                self.media_status[path.name]=f'failed ({type(err).__name__})'
+                return ''
+        if ext in ('.png','.jpeg','.jpg','.webp'):
+            try:
                 import pytesseract
                 from PIL import Image,ImageOps,ImageEnhance
+                import shutil
+                if not shutil.which('tesseract'):
+                    self.media_status[path.name]='failed (tesseract missing)'
+                    return ''
                 with Image.open(path) as im:
                     im=ImageOps.grayscale(im)
-                    return pytesseract.image_to_string(ImageEnhance.Contrast(im).enhance(1.7))
-        except (ImportError,OSError,Exception):
-            return ''
+                    text=pytesseract.image_to_string(ImageEnhance.Contrast(im).enhance(1.7)).strip()
+                self.media_status[path.name]='parsed' if text else 'empty'
+                return text
+            except Exception as err:
+                self.media_status[path.name]=f'failed ({type(err).__name__})'
+                return ''
         return ''
 
     def _load_evidence(self):
@@ -340,11 +394,8 @@ class EvidenceEngine:
         # Add operational activity as low-confidence context and links, never alone
         # assume a workflow SUCCESS means deletion actually occurred.
         self.activity_by_resource=defaultdict(list)
-        self.policy_event={}
         for a in sorted(self.activity,key=lambda r:r['event_time']):
             self.activity_by_resource[a['resource_id']].append(a)
-            if a.get('event_type') in ACTION_BY_EVENT and a.get('source_system')=='deletion_worker':
-                self.policy_event[a['resource_id']]=ACTION_BY_EVENT[a['event_type']]
 
     def _collect_document(self,txt,file_id,when):
         """PDF/image text: pipe records plus any resource ids named in the document.
@@ -474,13 +525,7 @@ class EvidenceEngine:
                 if kind == 'analytics' and any(e.system in ('account_service', 'search_service', 'support_platform', 'export_service') and e.state in ('PRESENT', 'IDENTIFIABLE', 'ACTIVE') for e in linked):
                     continue
                 for rank,res in self.link_candidates(case,uid,kind):
-                    if kind == 'analytics':
-                        sort_key = (rank, kind, case['case_id'], res)
-                    else:
-                        req_order = case.get('requested_at', '')
-                        if res == 'account_5482' and uid == 'user_28':
-                            req_order = '2026-08-26'
-                        sort_key = (rank, kind, req_order, case.get('email', ''), case['case_id'], res)
+                    sort_key = (rank, kind, case.get('requested_at', ''), case.get('email', ''), case['case_id'], res)
                     triples.append(sort_key)
         used=set();done=set()
         for item in sorted(triples):
@@ -501,17 +546,6 @@ class EvidenceEngine:
         if not candidates:return None
         when,fid=max(candidates)
         return Evidence('account_service',resource,'USER_PROFILE','ABSENT',when,fid,{},'',False,3)
-
-    def retained_later(self,uid,audit_at,known):
-        """Retained (audit) records for this subject that are only visible in files captured after audit_at.
-        The record id is stable, so it must still be verified, but it can never be cited as evidence."""
-        out={}
-        limit=utc(audit_at)
-        for e in self.evidence:
-            if e.kind!='SECURITY_AUDIT_LOG' or e.resource in known or e.resource in out:continue
-            if uid in self.resource_users.get(e.resource,()):
-                out[e.resource]=Evidence(e.system,e.resource,e.kind,'PRESENT',limit,'',{},'',False,0)
-        return list(out.values())
 
     def observed(self,uid,audit_at,extra=()):
         relevant=[]
@@ -559,12 +593,11 @@ def classify_intent(text):
     return False
 
 
-def disposition(e, rules, override=None):
+def disposition(e, rules):
     kind=e.kind
     if kind=='DATA_FLOW':return ('FLOW','ACTIVE' if e.state in ('ACTIVE','PRESENT') else 'DISABLED')
     if kind=='BACKUP_ARCHIVE':return ('RESTORE','ACTIVE' if e.state in ('ACTIVE','PRESENT') else 'BLOCKED')
     action=rules.get(kind)
-    if override and kind!='SECURITY_AUDIT_LOG':action=override
     if not action:
         # A tombstone is a special retained account record with strict redaction.
         if kind=='ACCOUNT_TOMBSTONE':action='REDACT'
@@ -593,7 +626,7 @@ def step(phase,operation,e,evidence_id=''):
            'VERIFY_RECORD_ANONYMIZED':'ANONYMIZED','VERIFY_DATA_FLOW_DISABLED':'DISABLED',
            'VERIFY_RESTORE_BLOCKED':'BLOCKED'}[operation]
     return {'phase':phase,'system_id':e.system,'resource_id':e.resource,
-            'operation':operation,'state':state,'evidence_id':evidence_id}
+           'operation':operation,'state':state,'evidence_id':evidence_id}
 
 
 def audit_case(case,engine:EvidenceEngine):
@@ -606,7 +639,7 @@ def audit_case(case,engine:EvidenceEngine):
     if not intent:
         return {'deletion_status':'NOT_APPLICABLE','steps':[]}
     uid=engine.subject_for(case['email'])
-    evidence=[];extra=[];later=[]
+    evidence=[];extra=[]
     if uid:
         # Account resources already tied to this subject by identity-bearing evidence win;
         # otherwise use the deletion-worker links (see link_candidates / assign_links).
@@ -621,20 +654,14 @@ def audit_case(case,engine:EvidenceEngine):
         extra=list(links.values())
         evidence=engine.observed(uid,case['audit_at'],extra=tuple(extra))
         account=links.get('account','')
-        if not account and uid:
-            m=re.match(r'^user_0*([1-9]|10)$',uid)
-            if m:account=f"account_{int(m.group(1)):03d}"
         if account and not any(e.resource==account for e in evidence):
             absence=engine.infer_sql_absence(account,case['audit_at'])
             if absence:evidence.append(absence)
             else:evidence.append(Evidence('account_service',account,'USER_PROFILE','ABSENT',utc(case['audit_at']),'',{},'',False,0))
-        later=engine.retained_later(uid,case['audit_at'],{e.resource for e in evidence})
     findings=[];remediations=[];checks=[];unresolved_retention=False
-    for e in evidence+later:
-        kind,state=disposition(e,engine.rules,engine.policy_event.get(e.resource))
+    for e in evidence:
+        kind,state=disposition(e,engine.rules)
         if kind=='UNKNOWN':continue
-        if e in later:
-            checks.append(step('VERIFICATION','VERIFY_RECORD_PRESENT',e,''));continue
         violation=False
         if kind=='DELETE':
             if state=='PRESENT':
@@ -677,12 +704,6 @@ def audit_case(case,engine:EvidenceEngine):
         f_res={s['resource_id'] for s in findings}
         checks=[{**s,'evidence_id':''} for s in checks
                 if s['resource_id'] in f_res or s['system_id'] in ('account_service','security_service')]
-        if not any(s['resource_id'].startswith('audit_record_') for s in checks):
-            ar_id = ''
-            if uid == 'user_50': ar_id = 'audit_record_6645'
-            elif uid == 'user_48': ar_id = 'audit_record_5569'
-            if ar_id:
-                checks.append({'phase': 'VERIFICATION', 'system_id': 'security_service', 'resource_id': ar_id, 'operation': 'VERIFY_RECORD_PRESENT', 'state': 'PRESENT', 'evidence_id': ''})
         items=findings+remediations+checks
     else:items=checks
     # The official order is phase -> operation table -> system -> resource.

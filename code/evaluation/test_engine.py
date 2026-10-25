@@ -91,6 +91,58 @@ def test_historical_identity():
         assert audit_case(case(),e)['deletion_status']=='INCOMPLETE'
     finally:temp.cleanup()
 
+
+def test_policy_supremacy_over_worker_delete():
+    events=[dict(resource_id='support_999',system='support_platform',record_type='SUPPORT_MESSAGE',
+                 email='old@example.test',result='IDENTIFIABLE',recorded_at='2026-01-15T12:00:00Z')]
+    temp,p=fixture(events)
+    putcsv(p/'deletion_rules.csv',[
+        dict(rule_id='r1',data_category='USER_PROFILE',condition='Always',required_action='DELETE'),
+        dict(rule_id='r5',data_category='SUPPORT_MESSAGE',condition='Shared context',required_action='REDACT')])
+    putcsv(p/'system_activity.csv',[
+        dict(activity_id='act_worker',event_time='2026-01-16T12:00:00Z',event_type='DELETE_RECORD',
+             source_system='deletion_worker',target_system='support_platform',resource_id='support_999',
+             reported_result='SUCCESS',details='user_999')])
+    try:
+        e=EvidenceEngine(p)
+        s=audit_case(case(),e)
+        rem=[x['operation'] for x in s['steps'] if x['phase']=='REMEDIATION']
+        assert 'REDACT_RECORD' in rem, f"Expected REDACT_RECORD from policy, got {rem}"
+        assert 'DELETE_RECORD' not in rem, "Worker DELETE must not override policy REDACT"
+    finally:temp.cleanup()
+
+
+def test_temporal_noninterference():
+    events=[dict(resource_id='account_999',system='account_service',record_type='USER_PROFILE',
+                 email='old@example.test',result='FOUND',recorded_at='2026-01-25T12:00:00Z')]
+    temp,p=fixture([])
+    putcsv(p/'evidence_files.csv',[
+        dict(file_id='evidence_future',file_path='evidence/records/future.json',origin='regression',captured_at='2026-01-25T12:00:00Z')])
+    dest=p/'evidence/records/future.json';dest.parent.mkdir(parents=True,exist_ok=True)
+    dest.write_text(json.dumps({'exported_at':'2026-01-25T12:00:00Z','records':events},indent=2))
+    try:
+        e=EvidenceEngine(p)
+        obs=e.observed('user_999','2026-01-20T12:00:00Z')
+        assert obs==[], f"Future evidence must be quarantined, got {obs}"
+    finally:temp.cleanup()
+
+
+def test_worker_success_never_proves_absence():
+    temp,p=fixture([])
+    putcsv(p/'system_activity.csv',[
+        dict(activity_id='act_worker',event_time='2026-01-16T12:00:00Z',event_type='DELETE_RECORD',
+             source_system='deletion_worker',target_system='account_service',resource_id='account_999',
+             reported_result='SUCCESS',details='user_999')])
+    try:
+        e=EvidenceEngine(p)
+        s=audit_case(case(),e)
+        assert s['deletion_status']=='INCOMPLETE'
+    finally:temp.cleanup()
+
+
 if __name__=='__main__':
-    for t in (test_non_deletion,test_tombstone_and_retention,test_resurrection_path,test_temporal_boundary,test_historical_identity):
+    for t in (test_non_deletion,test_tombstone_and_retention,test_resurrection_path,
+              test_temporal_boundary,test_historical_identity,
+              test_policy_supremacy_over_worker_delete,test_temporal_noninterference,
+              test_worker_success_never_proves_absence):
         t();print('PASS',t.__name__)
